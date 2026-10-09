@@ -1,0 +1,16 @@
+{
+  "name": "ima",
+  "role": "dev-lessons 的内嵌模块（原 ima-skill 技能），提供 ima OpenAPI 调用与知识库上传能力",
+  "version": "1.1.10-rebuilt",
+  "embedded_in": "skills/dev-lessons/（2026-10-09 由独立技能 skills/ima-skill 嵌入）",
+  "rebuilt_from": {
+    "mirror": "bighardperson/computer-science-skills-collection@v1.1.2",
+    "contract": "用户提供的《ima 技能安装指南》（官方 v1.1.10，2026-09-29 实测补充）"
+  },
+  "rebuilt_date": "2026-10-09",
+  "known_gaps": [
+    "notes/scripts/note-images.cjs 未包含于社区镜像，笔记图片写入能力不可用（本项目未使用）",
+    "ima_api.cjs 为按指南契约重建件，非官方原件"
+  ],
+  "homepage": "https://ima.qq.com"
+}
