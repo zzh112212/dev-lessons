@@ -1,28 +1,37 @@
 #!/usr/bin/env python3
-"""dev-lessons 经验文件工具（单文件版）：条目校验（check）与目录生成（toc）。
+"""dev-lessons 经验文件工具（单文件版）：校验、目录、查看与统计。
 
 所有经验集中在 experiences/lessons.md 一个文件：
     python3 <技能目录>/scripts/lessons.py check   # 校验分区/条目三要素/ID 唯一
     python3 <技能目录>/scripts/lessons.py toc     # 原位重建文件头目录表
+    python3 <技能目录>/scripts/lessons.py view    # 带计数地读取经验文件（AI 查用必走此命令）
+    python3 <技能目录>/scripts/lessons.py stats   # 查看经验文件被查阅次数统计
 
 路径说明：
     <技能目录> = 技能实际安装路径（如 ~/.claude/skills/dev-lessons），以安装位置为准。
     经验文件默认相对当前工作区根解析 experiences/lessons.md；
     可用 --file 指定其他路径，或环境变量 LESSONS_FILE 指定默认值。
 
-退出码：0 成功（含仅有警告）；1 存在格式错误；2 参数错误。
-警告不阻断 toc 重建（如缺「验证」字段）。
+使用计数：check/toc/view 每次运行都会在经验文件同目录的 lessons_usage.jsonl
+追加一条事件（时间戳 + 事件类型 + 文件是否存在）。stats 命令汇总该日志，
+让用户直观看到经验文件是否被 AI 查看及查看次数。
+
+退出码：0 成功（含仅有警告）；1 存在格式错误或文件缺失；2 参数错误。
+警告不阻断 toc 重建（如缺「验证」字段、draft 标记错位）。
 """
 import argparse
+import json
 import os
 import re
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 ID_RE = re.compile(r"^### (GEN-[A-Z]{3,4}-\d{3}|PRJ-\d{3}) · .+")
 SEC_RE = re.compile(r"^## (通用 · .+|专用 · .+)\s*$")
-DRAFT_RE = re.compile(r"[（(]\s*draft\s*[)）]\s*$")  # 全角/半角括号均识别
+DRAFT_RE = re.compile(r"[（(]\s*draft\s*[)）]\s*$")
+DRAFT_ANY = re.compile(r"[（(]\s*draft\s*[)）]")  # 任意位置的 draft 标记（用于错位检测）
 REQ_KEYS = ("问题", "原因", "解决")
 
 
@@ -44,7 +53,7 @@ def parse(path: Path):
         m = SEC_RE.match(line)
         if m:
             section = line[3:].strip()
-            cur = None  # 条目天然结束于下一标题，无需收尾标记
+            cur = None
             continue
         if line.startswith("### "):
             if not ID_RE.match(line):
@@ -56,6 +65,9 @@ def parse(path: Path):
                 errors.append(f"L{i}: 条目 {line[4:20]}… 不在任何分区（## 通用 · … / ## 专用 · …）内")
             entries.append(cur)
             continue
+        # P4 检测：draft 标记出现在非标题行（正文/验证行）会被静默忽略，状态仍按正式计
+        if DRAFT_ANY.search(line) and not line.startswith("|"):
+            warnings.append(f"L{i}: draft 标记出现在非标题行（应写在条目标题行尾，否则状态计为正式）：{line.strip()[:50]}")
         if cur is not None:
             km = re.match(r"^\*\*(问题|原因|解决|验证)\*\*", line)
             if km:
@@ -78,10 +90,28 @@ def _is_draft(title: str) -> bool:
     return bool(DRAFT_RE.search(title))
 
 
+def log_event(path: Path, event: str):
+    """使用计数：每次 check/toc/view 记一条事件到经验文件同目录 lessons_usage.jsonl。"""
+    try:
+        logf = path.parent / "lessons_usage.jsonl"
+        entry = {"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 "event": event, "file": str(path), "exists": path.exists()}
+        with logf.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # 统计失败不影响主功能
+
+
+def _missing(path: Path, event: str):
+    log_event(path, event)
+    print(f"[FAIL] {path} 不存在（可用 --file 指定，或确认当前目录为工作区根）")
+    return 1
+
+
 def cmd_check(path: Path):
+    log_event(path, "check")
     if not path.exists():
-        print(f"[FAIL] {path} 不存在（可用 --file 指定，或确认当前目录为工作区根）")
-        return 1
+        return _missing(path, "check-miss")
     entries, errors, warnings = parse(path)
     formal = [e for e in entries if not _is_draft(e["title"])]
     draft = [e for e in entries if _is_draft(e["title"])]
@@ -99,9 +129,9 @@ def cmd_check(path: Path):
 
 
 def cmd_toc(path: Path):
+    log_event(path, "toc")
     if not path.exists():
-        print(f"[FAIL] {path} 不存在（可用 --file 指定，或确认当前目录为工作区根）")
-        return 1
+        return _missing(path, "toc-miss")
     entries, errors, warnings = parse(path)
     if errors:
         print("存在格式错误，先运行 check 修复：")
@@ -144,14 +174,53 @@ def cmd_toc(path: Path):
     return 0
 
 
+def cmd_view(path: Path):
+    log_event(path, "view")
+    if not path.exists():
+        return _missing(path, "view-miss")
+    print(path.read_text(encoding="utf-8"), end="")
+    return 0
+
+
+def cmd_stats(path: Path):
+    logf = path.parent / "lessons_usage.jsonl"
+    if not logf.exists():
+        print(f"暂无使用记录（日志将生成于 {logf}）")
+        return 0
+    events = []
+    for line in logf.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    views = [e for e in events if e.get("event", "").startswith("view")]
+    misses = [e for e in events if e.get("event", "").endswith("-miss")]
+    print(f"经验文件使用统计（{logf}）")
+    print(f"  被查看 {len(views)} 次 | 各类事件：", end="")
+    for ev, n in Counter(e.get("event", "?") for e in events).most_common():
+        print(f"{ev}×{n} ", end="")
+    print()
+    if misses:
+        print(f"  ⚠ 未命中尝试 {len(misses)} 次（文件不存在时的访问）")
+    if views:
+        print("  最近 5 次查看：")
+        for e in views[-5:]:
+            print(f"    {e.get('ts', '?')}  exists={e.get('exists')}")
+    return 0
+
+
 def main():
-    p = argparse.ArgumentParser(prog="lessons.py", description="dev-lessons 经验文件工具（check/toc）",
+    p = argparse.ArgumentParser(prog="lessons.py", description="dev-lessons 经验文件工具（check/toc/view/stats）",
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("cmd", choices=("check", "toc"), help="check=校验；toc=重建目录表")
+    p.add_argument("cmd", choices=("check", "toc", "view", "stats"),
+                   help="check=校验；toc=重建目录表；view=带计数读取；stats=查看次数统计")
     p.add_argument("--file", default=os.environ.get("LESSONS_FILE", "experiences/lessons.md"),
                    help="经验文件路径（默认 experiences/lessons.md，相对当前目录）")
     a = p.parse_args()
-    sys.exit(cmd_check(Path(a.file)) if a.cmd == "check" else cmd_toc(Path(a.file)))
+    fn = {"check": cmd_check, "toc": cmd_toc, "view": cmd_view, "stats": cmd_stats}[a.cmd]
+    sys.exit(fn(Path(a.file)))
 
 
 if __name__ == "__main__":
