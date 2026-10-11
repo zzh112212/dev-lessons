@@ -1,128 +1,226 @@
 #!/usr/bin/env node
-'use strict';
-/*
- * ima_api.cjs — IMA OpenAPI 统一调用入口（按官方 v1.1.10 安装指南契约重建）
- *
- * 用法：
- *   node ima_api.cjs "<API路径>" '<JSON请求体>' [OPTS]
- *   node ima_api.cjs "openapi/wiki/v1/search_knowledge_base" '{"query":""}'
- *
- * OPTS（可选，第三参数，适合不便写用户目录的沙盒）：
- *   '{"clientId":"...","apiKey":"..."}'  （也接受 client_id/api_key 键名）
- *
- * 凭证优先级：
- *   1. OPTS 参数
- *   2. 环境变量 IMA_CLIENT_ID / IMA_API_KEY
- *   3. 环境变量 IMA_OPENAPI_CLIENTID / IMA_OPENAPI_APIKEY
- *   4. 配置文件 ~/.config/ima/client_id 与 ~/.config/ima/api_key
- *   5. $IMA_CREDENTIALS_FILE 指向的 JSON 文件（clientId/apiKey 或 client_id/api_key）
- *
- * 约定：
- *   - Base URL: https://ima.qq.com（所有请求仅发往官方域名）
- *   - 认证头：ima-openapi-clientid / ima-openapi-apikey
- *   - 统一响应：{"code":0,"msg":"...","data":{...}}；code=-200 表示技能有新版本
- *   - 凭证仅发往 ima.qq.com，不写入日志、不外传
- */
 
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
-const BASE_URL = 'https://ima.qq.com';
+const DEFAULT_BASE_URL = 'https://ima.qq.com';
+const DEFAULT_LAST_CHECK_FILE = path.join(os.homedir(), '.config/ima/last_update_check');
 
-function fromPair(clientId, apiKey, from) {
-  if (clientId && apiKey) return { clientId, apiKey, from };
-  return null;
+// Only two categories of errors:
+//   -100: programmatic error (bad args, missing credentials, network, etc.)
+//   -200: skill update available
+const ERR_PROGRAMMATIC = -100;
+const ERR_UPDATE_AVAILABLE = -200;
+
+function readFileSafe(filePath) {
+  try {
+    return fs.readFileSync(filePath, 'utf8').trim();
+  } catch {
+    return '';
+  }
 }
 
-function loadCredentials() {
-  // 1. OPTS 参数
-  const optsRaw = process.argv[4];
-  if (optsRaw) {
-    try {
-      const o = JSON.parse(optsRaw);
-      const hit = fromPair(o.clientId, o.apiKey, 'opts') || fromPair(o.client_id, o.api_key, 'opts');
-      if (hit) return hit;
-    } catch (e) {
-      console.error('OPTS 第三参数不是合法 JSON：' + e.message);
-      process.exit(2);
-    }
+function ensureDir(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+}
+
+function loadCredentials(options = {}) {
+  const clientId =
+    options.clientId ||
+    process.env.IMA_CLIENT_ID ||
+    process.env.IMA_OPENAPI_CLIENTID ||
+    readFileSafe(path.join(os.homedir(), '.config/ima/client_id'));
+  const apiKey =
+    options.apiKey ||
+    process.env.IMA_API_KEY ||
+    process.env.IMA_OPENAPI_APIKEY ||
+    readFileSafe(path.join(os.homedir(), '.config/ima/api_key'));
+
+  if (!clientId || !apiKey) {
+    const err = new Error('missing credentials');
+    err.code = ERR_PROGRAMMATIC;
+    err.msg =
+      '未找到 IMA 凭证（clientId / apiKey）。请设置 IMA_CLIENT_ID 和 IMA_API_KEY 环境变量，或将凭证放置在 ~/.config/ima/ 目录下。';
+    throw err;
   }
-  // 2/3. 环境变量
-  const envHit = fromPair(process.env.IMA_CLIENT_ID, process.env.IMA_API_KEY, 'env:IMA_*')
-    || fromPair(process.env.IMA_OPENAPI_CLIENTID, process.env.IMA_OPENAPI_APIKEY, 'env:IMA_OPENAPI_*');
-  if (envHit) return envHit;
-  // 4. 配置文件
+
+  return { clientId, apiKey };
+}
+
+function loadSkillVersion(options = {}) {
+  if (options.skillVersion) return options.skillVersion;
+  if (process.env.IMA_SKILL_VERSION) return process.env.IMA_SKILL_VERSION;
+
+  const metaPath = path.join(__dirname, 'meta.json');
   try {
-    const dir = path.join(os.homedir(), '.config', 'ima');
-    const clientId = fs.readFileSync(path.join(dir, 'client_id'), 'utf8').trim();
-    const apiKey = fs.readFileSync(path.join(dir, 'api_key'), 'utf8').trim();
-    const fileHit = fromPair(clientId, apiKey, 'file:~/.config/ima');
-    if (fileHit) return fileHit;
-  } catch (e) { /* 未配置，继续 */ }
-  // 5. IMA_CREDENTIALS_FILE
-  if (process.env.IMA_CREDENTIALS_FILE) {
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    return meta.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function postJson(apiPath, body, requestOptions) {
+  const { clientId, apiKey, skillVersion, baseUrl } = requestOptions;
+
+  const res = await fetch(`${baseUrl}/${apiPath}`, {
+    method: 'POST',
+    headers: {
+      'ima-openapi-clientid': clientId,
+      'ima-openapi-apikey': apiKey,
+      'ima-openapi-ctx': `skill_version=${skillVersion}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  return await res.text();
+}
+
+function readToday() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function saveTodayChecked(lastCheckFile, today) {
+  ensureDir(lastCheckFile);
+  fs.writeFileSync(lastCheckFile, today, 'utf8');
+}
+
+async function checkSkillUpdateIfNeeded(requestOptions) {
+  const { forceCheck, skillVersion, lastCheckFile } = requestOptions;
+
+  const today = readToday();
+  const checkedDay = readFileSafe(lastCheckFile);
+
+  if (!forceCheck && checkedDay === today) {
+    return;
+  }
+
+  let updateResponseText;
+  try {
+    updateResponseText = await postJson('openapi/check_skill_update', { version: skillVersion }, requestOptions);
+  } catch {
+    // Skip this round when update check fails.
+    return;
+  }
+
+  saveTodayChecked(lastCheckFile, today);
+
+  let updateResp;
+  try {
+    updateResp = JSON.parse(updateResponseText || '{}');
+  } catch {
+    updateResp = {};
+  }
+
+  const latestVersion = (updateResp.data && updateResp.data.latest_version) || '';
+  const releaseDesc = (updateResp.data && updateResp.data.release_desc) || '';
+  const instruction = (updateResp.data && updateResp.data.instruction) || '';
+  if (latestVersion && latestVersion !== skillVersion) {
+    const updateContext = {
+      current_version: skillVersion,
+      latest_version: latestVersion,
+      release_desc: releaseDesc,
+      instruction,
+      checked_at: new Date().toISOString(),
+    };
+
+    process.stdout.write(JSON.stringify(updateContext));
+
+    const err = new Error('update available');
+    err.code = ERR_UPDATE_AVAILABLE;
+    err.msg = `发现新版本 skill：${latestVersion}（当前版本：${skillVersion}）。${instruction || '请更新。'}`;
+    err.updateContext = updateContext;
+    throw err;
+  }
+}
+
+async function imaApi(apiPath, body, options = {}) {
+  const forceCheck = options.forceCheck || options.forceUpdateCheck || process.env.IMA_FORCE_UPDATE_CHECK === '1';
+  const baseUrl = options.baseUrl || process.env.IMA_BASE_URL || DEFAULT_BASE_URL;
+  const lastCheckFile = options.lastCheckFile || process.env.IMA_LAST_CHECK_FILE || DEFAULT_LAST_CHECK_FILE;
+  const { clientId, apiKey } = loadCredentials(options);
+  const skillVersion = loadSkillVersion(options);
+
+  const requestOptions = {
+    forceCheck,
+    clientId,
+    apiKey,
+    skillVersion,
+    baseUrl,
+    lastCheckFile,
+  };
+
+  if (apiPath !== 'openapi/check_skill_update') {
+    await checkSkillUpdateIfNeeded(requestOptions);
+  }
+
+  return postJson(apiPath, body, requestOptions);
+}
+
+function parseBody(raw) {
+  if (!raw || !raw.trim()) return {};
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const err = new Error('invalid JSON body');
+    err.code = ERR_PROGRAMMATIC;
+    err.msg = '请求 body 不是合法的 JSON，请检查输入。';
+    throw err;
+  }
+}
+
+function parseOptions(raw, restArgs) {
+  let options = {};
+
+  if (raw && raw.trim()) {
     try {
-      const o = JSON.parse(fs.readFileSync(process.env.IMA_CREDENTIALS_FILE, 'utf8'));
-      const credHit = fromPair(o.clientId, o.apiKey, 'file:$IMA_CREDENTIALS_FILE')
-        || fromPair(o.client_id, o.api_key, 'file:$IMA_CREDENTIALS_FILE');
-      if (credHit) return credHit;
-    } catch (e) {
-      console.error('IMA_CREDENTIALS_FILE 读取失败：' + e.message);
-      process.exit(2);
+      options = JSON.parse(raw);
+    } catch {
+      const err = new Error('invalid options JSON');
+      err.code = ERR_PROGRAMMATIC;
+      err.msg = 'options 参数不是合法的 JSON，请检查输入。';
+      throw err;
     }
   }
-  return null;
+
+  if (restArgs.includes('--force-update-check')) {
+    options.forceCheck = true;
+  }
+
+  return options;
 }
 
 async function main() {
-  const apiPath = process.argv[2];
-  if (!apiPath || apiPath === '--help' || apiPath === '-h') {
-    console.log('用法: node ima_api.cjs "<API路径>" \'<JSON请求体>\' [OPTS]');
-    console.log('示例: node ima_api.cjs "openapi/wiki/v1/search_knowledge_base" \'{"query":""}\'');
-    process.exit(apiPath ? 0 : 2);
-  }
-  const bodyRaw = process.argv[3] || '{}';
-  let bodyObj;
-  try {
-    bodyObj = JSON.parse(bodyRaw);
-  } catch (e) {
-    console.error('请求体不是合法 JSON：' + e.message);
-    process.exit(2);
-  }
+  const [, , apiPath, rawBody = '{}', rawOptions = '{}', ...rest] = process.argv;
 
-  const cred = loadCredentials();
-  if (!cred) {
-    console.error('缺少 IMA 凭证。请按 SKILL.md Setup 配置：OPTS 参数 / 环境变量 / ~/.config/ima/ / $IMA_CREDENTIALS_FILE');
+  if (!apiPath) {
+    process.stderr.write(JSON.stringify({ code: ERR_PROGRAMMATIC, msg: '缺少必需参数：apiPath。' }));
+    // Unix exit codes are 0-255; use 1 as generic failure. Callers should parse stderr JSON for the real code.
     process.exit(1);
   }
 
-  const url = BASE_URL + '/' + apiPath.replace(/^\/+/, '');
-  let resp;
   try {
-    resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'ima-openapi-clientid': cred.clientId,
-        'ima-openapi-apikey': cred.apiKey,
-      },
-      body: JSON.stringify(bodyObj),
-    });
-  } catch (e) {
-    console.error('请求失败（网络层）：' + e.message);
+    const body = parseBody(rawBody);
+    const options = parseOptions(rawOptions, rest);
+    const resp = await imaApi(apiPath, body, options);
+    process.stdout.write(resp);
+  } catch (err) {
+    const code = err && typeof err.code === 'number' ? err.code : ERR_PROGRAMMATIC;
+    const msg = (err && err.msg) || (err && err.message) || '未知错误';
+    process.stderr.write(JSON.stringify({ code, msg }));
     process.exit(1);
   }
-
-  const text = await resp.text();
-  let out;
-  try {
-    out = JSON.parse(text);
-  } catch (e) {
-    out = { http_status: resp.status, raw: text.slice(0, 2000) };
-  }
-  console.log(JSON.stringify(out));
-  if (out && typeof out.code === 'number' && out.code !== 0) process.exit(1);
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  imaApi,
+  ERR_PROGRAMMATIC,
+  ERR_UPDATE_AVAILABLE,
+};

@@ -63,11 +63,13 @@ description: |
 
 **执行前必读**：`ima/knowledge-base/SKILL.md`（安全门流程）。要点：
 
+0. **凭证预检**：官方模块读取顺序 = 环境变量 `IMA_CLIENT_ID`/`IMA_API_KEY`（推荐，不落盘）→ `~/.config/ima/client_id|api_key` 文件。**技能内嵌 ima 模块 ≠ 凭证已配置**；缺凭证时引导用户从 **https://ima.qq.com/agent-interface** 获取（官方唯一入口）。
 1. 上传物是**单文件** `experiences/lessons.md`（.md → media_type 7，text/markdown，≤10MB）。
-2. 目标库：用户个人知识库「开发经验库」（用 `search_knowledge_base` 按名称查 kb_id，本地缓存 `tmp/kb_id.txt`）。
-3. 流程：preflight 预检 → `check_repeated_names` 重名检查（重名时与用户确认，时间戳后缀并存，旧副本需用户在 ima 客户端手动清理——无 API 删除）→ `create_media` 取 COS 凭证 → COS 上传 → `add_knowledge`。
-4. 上传后验证：`get_knowledge_list` 清点（响应字段 `knowledge_list`）+ `search_knowledge` 检索测试。
-5. 凭证：`tmp/ima_credentials.json`，`export IMA_CREDENTIALS_FILE="$PWD/tmp/ima_credentials.json"` 注入，不得写入任何交付物。
+2. 目标库：默认「开发经验库」，`search_knowledge_base` 按名称查 kb_id（本地缓存 `tmp/kb_id.txt`）；**库不存在时可建库**（未公开接口）`create_knowledge_base` 传 `{"type": "KBT_MINE_KB", "name": "<≤25字符>"}`——type 报错会列出合法枚举（KBT_MINE_KB=我的库）。
+3. 流程：preflight 预检 → `check_repeated_names`（参数为 `params:[{name,media_type}]` 数组；重名时与用户确认，时间戳后缀并存，旧副本需用户在 ima 客户端手动清理——无 API 删除）→ `create_media` 取 COS 凭证（必填含 `content_type`/`file_ext`/`knowledge_base_id`）→ COS 上传 → `add_knowledge`（`title` 必须等于 `file_name`）。
+4. 上传后验证：`get_knowledge_list` 清点（**必填 `cursor`+`limit`（1-50）**，响应字段 `knowledge_list`）+ `search_knowledge` 检索测试（命中即入库成功；正文索引异步生成数分钟）。
+5. 凭证注入：环境变量，或工作区 `tmp/ima_env.sh`（chmod 600，source 注入）；不得写入任何交付物或经验文件。
+6. 遇 `code: 51`（参数校验）：**直接读 msg**——服务端会列出合法枚举/取值范围，按报错对齐字段重试，勿盲猜（2026-10-12 建库+上传全链路实证）。
 
 ## 禁止事项
 
