@@ -103,7 +103,6 @@ def log_event(path: Path, event: str):
 
 
 def _missing(path: Path, event: str):
-    log_event(path, event)
     print(f"[FAIL] {path} 不存在（可用 --file 指定，或确认当前目录为工作区根）")
     return 1
 
@@ -195,19 +194,21 @@ def cmd_stats(path: Path):
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-    views = [e for e in events if e.get("event", "").startswith("view")]
-    misses = [e for e in events if e.get("event", "").endswith("-miss")]
+    hits = [e for e in events if e.get("event") == "view" and e.get("exists")]
+    misses = [e for e in events if not e.get("exists")]
     print(f"经验文件使用统计（{logf}）")
-    print(f"  被查看 {len(views)} 次 | 各类事件：", end="")
+    print(f"  成功查看 {len(hits)} 次 | 未命中尝试 {len(misses)} 次 | 各类事件：", end="")
     for ev, n in Counter(e.get("event", "?") for e in events).most_common():
         print(f"{ev}×{n} ", end="")
     print()
     if misses:
-        print(f"  ⚠ 未命中尝试 {len(misses)} 次（文件不存在时的访问）")
-    if views:
-        print("  最近 5 次查看：")
-        for e in views[-5:]:
-            print(f"    {e.get('ts', '?')}  exists={e.get('exists')}")
+        print("  ⚠ 未命中明细（文件不存在时的访问）：")
+        for e in misses[-5:]:
+            print(f"    {e.get('ts', '?')}  {e.get('event', '?')}")
+    if hits:
+        print("  最近 5 次成功查看：")
+        for e in hits[-5:]:
+            print(f"    {e.get('ts', '?')}")
     return 0
 
 
@@ -220,7 +221,11 @@ def main():
                    help="经验文件路径（默认 experiences/lessons.md，相对当前目录）")
     a = p.parse_args()
     fn = {"check": cmd_check, "toc": cmd_toc, "view": cmd_view, "stats": cmd_stats}[a.cmd]
-    sys.exit(fn(Path(a.file)))
+    try:
+        sys.exit(fn(Path(a.file)))
+    except BrokenPipeError:  # 输出被管道截断（如 stats | head）属正常用法，静默退出
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(0)
 
 
 if __name__ == "__main__":
