@@ -1,11 +1,8 @@
 ---
-name: ima-skill
+name: ima
 description: |
-  统一的 IMA OpenAPI 技能，支持笔记管理和知识库操作。
-  当用户提到知识库、资料库、笔记、备忘录、记事，或者想要上传文件、添加网页到知识库、
-  搜索知识库内容、搜索/浏览/创建/编辑笔记时，使用此 skill。
-  即使用户没有明确说"知识库"或"笔记"，只要意图涉及文件上传到知识库、网页收藏、
-  知识搜索、个人文档存取（如"帮我记一下"、"搜一下知识库里有没有XX"），也应触发此 skill。
+  【dev-lessons 内嵌模块——不独立触发】由 dev-lessons 上传工作流按需读取。
+  提供 IMA OpenAPI 调用：笔记管理与知识库操作（上传文件、搜索、浏览）。
 description_zh: "ima笔记与知识库管理（读取、写入、检索、上传文件）"
 description_en: "IMA notes & knowledge base management (read, write, search, upload)"
 version: 1.1.10-rebuilt
@@ -54,8 +51,10 @@ export IMA_OPENAPI_APIKEY="your_api_key"
 **方式 C — 调用参数（适合不便写用户目录的沙盒）：**
 
 ```bash
-node skills/dev-lessons/ima/ima_api.cjs "<API路径>" '<请求体>' '{"clientId":"...","apiKey":"..."}'
+node <技能目录>/ima/ima_api.cjs "<API路径>" '<请求体>' '{"clientId":"...","apiKey":"..."}'
 ```
+
+> `<技能目录>` = 技能实际安装路径（如 `~/.claude/skills/dev-lessons`），勿照抄字面量。
 
 Agent 会按优先级依次尝试：OPTS 参数 → 环境变量 → 配置文件。
 
@@ -78,7 +77,7 @@ fi
 所有请求统一为 **HTTP POST + JSON Body**，仅发往官方 Base URL `https://ima.qq.com`。统一入口脚本 `ima_api.cjs`（本技能根目录）自动完成凭证读取与认证头注入：
 
 ```bash
-node skills/dev-lessons/ima/ima_api.cjs "<API路径>" '<JSON请求体>' [OPTS]
+node <技能目录>/ima/ima_api.cjs "<API路径>" '<JSON请求体>' [OPTS]
 ```
 
 示例（新建测试笔记）：

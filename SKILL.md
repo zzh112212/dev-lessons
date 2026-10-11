@@ -43,7 +43,8 @@ description: |
    - `**解决**`：可操作步骤或命令
    - `**验证**`（可选）：一行，何时何场景实证过
    - 分区选择：**通用**（剥离项目上下文仍成立，按项目类型分区）/ **专用**（依赖本项目特有事物）。拿不准 → 专用或标 draft。
-3. 运行 `python3 skills/dev-lessons/scripts/lessons.py check && python3 skills/dev-lessons/scripts/lessons.py toc` 校验并重建目录。
+3. 运行 `python3 <技能目录>/scripts/lessons.py check && python3 <技能目录>/scripts/lessons.py toc` 校验并重建目录。
+   `<技能目录>` = 技能实际安装路径（如 `~/.claude/skills/dev-lessons`，勿照抄字面量）；经验文件默认相对工作区根 `experiences/lessons.md`，其他位置用 `--file <路径>` 指定。缺「验证」字段仅警告不阻断。
 4. 提醒用户可上传知识库（本次未上传则说明下次新会话开场会再查）。
 
 ## 查用工作流（任务开始/犯错/不确定时）
